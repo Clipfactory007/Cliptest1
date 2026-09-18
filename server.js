@@ -310,12 +310,14 @@ async function processJob(jobId, userId, masterUrl, clips) {
         const stats = fs.statSync(clipLocalPath);
 
         results.push({
+          filename: clipFileName,
           storage_path: clipLink.storage_path,
           thumbnail_path: thumbLink.storage_path,
           public_url: clipLink.public_url,
           duration_seconds: durationSec,
           size_bytes: stats.size,
           title: clip.suggested_title || null,
+          position: Number(index),
           start_timestamp: clip.start_timestamp,
           end_timestamp: clip.end_timestamp,
           hook_line: clip.hook_line || null,
