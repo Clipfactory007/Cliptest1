@@ -9,7 +9,8 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
+const readline = require("readline");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
@@ -184,7 +185,17 @@ async function reportBack(payload) {
 
 const WORK_ROOT = process.env.WORK_DIR || os.tmpdir();
 
-async function remuxToFaststart(masterUrl, localOutPath) {
+async function getDurationSeconds(masterUrl) {
+  const { stdout } = await execFileAsync(
+    "ffprobe",
+    ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", masterUrl],
+    { maxBuffer: 1024 * 1024 }
+  );
+  const seconds = parseFloat(stdout.trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+async function remuxToFaststart(masterUrl, localOutPath, onProgress) {
   // Many raw recording exports put the file's index (moov atom) at the
   // END of the file instead of the front. That forces ffmpeg to pull far
   // more data than it should just to locate a cut point when reading over
@@ -193,11 +204,49 @@ async function remuxToFaststart(masterUrl, localOutPath) {
   // subsequent per-clip cut fast and cheap. This needs a real seekable
   // local file to write to (not a network stream), which is why the
   // attached persistent disk matters here.
-  await execFileAsync(
-    "ffmpeg",
-    ["-y", "-i", masterUrl, "-c", "copy", "-movflags", "+faststart", localOutPath],
-    { maxBuffer: 1024 * 1024 * 20 }
-  );
+  const totalSeconds = await getDurationSeconds(masterUrl);
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn("ffmpeg", [
+      "-y",
+      "-i",
+      masterUrl,
+      "-c",
+      "copy",
+      "-movflags",
+      "+faststart",
+      "-progress",
+      "pipe:1",
+      "-nostats",
+      localOutPath,
+    ]);
+
+    let lastReported = -1;
+    const rl = readline.createInterface({ input: proc.stdout });
+    rl.on("line", (line) => {
+      // ffmpeg -progress emits lines like "out_time_ms=12345678"
+      const match = line.match(/^out_time_ms=(\d+)/);
+      if (match && totalSeconds && onProgress) {
+        const processedSeconds = Number(match[1]) / 1_000_000;
+        const percent = Math.min(99, Math.round((processedSeconds / totalSeconds) * 100));
+        if (percent !== lastReported) {
+          lastReported = percent;
+          onProgress(percent);
+        }
+      }
+    });
+
+    let stderrTail = "";
+    proc.stderr.on("data", (chunk) => {
+      stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+    });
+
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited with code ${code}: ${stderrTail}`));
+    });
+  });
 }
 
 async function processJob(jobId, userId, masterUrl, clips) {
@@ -206,8 +255,10 @@ async function processJob(jobId, userId, masterUrl, clips) {
 
   try {
     console.log(`[${jobId}] Fixing master file structure (faststart)...`);
-    await reportProgress(jobId, 0, 0, null, "fixing_file");
-    await remuxToFaststart(masterUrl, fixedMasterPath);
+    await reportProgress(jobId, 0, 100, null, "fixing_file");
+    await remuxToFaststart(masterUrl, fixedMasterPath, (percent) => {
+      reportProgress(jobId, percent, 100, null, "fixing_file").catch(() => {});
+    });
 
     const planned = clips.map((clip, i) => {
       const index = String(i + 1).padStart(2, "0");
