@@ -1,0 +1,15 @@
+{
+  "name": "clipdesk-backend",
+  "version": "1.0.0",
+  "description": "Clip Desk video cutting backend for The Wealth Clock",
+  "main": "server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
