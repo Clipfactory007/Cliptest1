@@ -102,12 +102,9 @@ async function putFile(uploadUrl, filePath, contentType) {
   }
 }
 
-async function cutClip(masterUrl, startSec, durationSec, outPath) {
-  // Cut directly from the remote signed URL instead of downloading the
-  // whole master file first. ffmpeg reads HTTP(S) sources natively, and
-  // since we're stream-copying (no re-encode), it only pulls the bytes it
-  // needs for this clip's time range. This avoids ever holding the full
-  // multi-GB master in memory or on (possibly RAM-backed) local storage.
+async function cutClip(masterSource, startSec, durationSec, outPath) {
+  // masterSource is now the local, faststart-fixed file (fast, cheap
+  // seeking), not the original remote URL.
   await execFileAsync(
     "ffmpeg",
     [
@@ -115,7 +112,7 @@ async function cutClip(masterUrl, startSec, durationSec, outPath) {
       "-ss",
       String(startSec),
       "-i",
-      masterUrl,
+      masterSource,
       "-t",
       String(durationSec),
       "-c",
@@ -179,10 +176,32 @@ async function reportBack(payload) {
   }
 }
 
+const WORK_ROOT = process.env.WORK_DIR || os.tmpdir();
+
+async function remuxToFaststart(masterUrl, localOutPath) {
+  // Many raw recording exports put the file's index (moov atom) at the
+  // END of the file instead of the front. That forces ffmpeg to pull far
+  // more data than it should just to locate a cut point when reading over
+  // HTTP, which is what was crashing this service. Fixing it once, up
+  // front, with a plain sequential copy (no seeking) makes every
+  // subsequent per-clip cut fast and cheap. This needs a real seekable
+  // local file to write to (not a network stream), which is why the
+  // attached persistent disk matters here.
+  await execFileAsync(
+    "ffmpeg",
+    ["-y", "-i", masterUrl, "-c", "copy", "-movflags", "+faststart", localOutPath],
+    { maxBuffer: 1024 * 1024 * 20 }
+  );
+}
+
 async function processJob(jobId, userId, masterUrl, clips) {
-  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), `job-${jobId}-`));
+  const workDir = fs.mkdtempSync(path.join(WORK_ROOT, `job-${jobId}-`));
+  const fixedMasterPath = path.join(workDir, "master-fixed.mp4");
 
   try {
+    console.log(`[${jobId}] Fixing master file structure (faststart)...`);
+    await remuxToFaststart(masterUrl, fixedMasterPath);
+
     const planned = clips.map((clip, i) => {
       const index = String(i + 1).padStart(2, "0");
       const slug = slugify(clip.suggested_title || `clip-${index}`);
@@ -220,7 +239,7 @@ async function processJob(jobId, userId, masterUrl, clips) {
         const durationSec = Math.max(1, endSec - startSec);
 
         console.log(`[${jobId}] Cutting clip ${index}: ${clip.start_timestamp} - ${clip.end_timestamp}`);
-        await cutClip(masterUrl, startSec, durationSec, clipLocalPath);
+        await cutClip(fixedMasterPath, startSec, durationSec, clipLocalPath);
         await makeThumbnail(clipLocalPath, thumbLocalPath);
 
         const clipLink = linkByName.get(clipFileName);
