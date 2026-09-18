@@ -140,11 +140,17 @@ async function makeThumbnail(clipPath, outPath) {
   ]);
 }
 
-async function reportProgress(jobId, completed, total, currentClipTitle) {
+async function reportProgress(jobId, completed, total, currentClipTitle, stage) {
   if (!PROGRESS_URL) return; // optional; skip quietly if not configured
   try {
     const body = Buffer.from(
-      JSON.stringify({ job_id: jobId, completed, total, current_clip_title: currentClipTitle || null })
+      JSON.stringify({
+        job_id: jobId,
+        completed,
+        total,
+        current_clip_title: currentClipTitle || null,
+        stage: stage || undefined,
+      })
     );
     await fetch(PROGRESS_URL, {
       method: "POST",
@@ -200,6 +206,7 @@ async function processJob(jobId, userId, masterUrl, clips) {
 
   try {
     console.log(`[${jobId}] Fixing master file structure (faststart)...`);
+    await reportProgress(jobId, 0, 0, null, "fixing_file");
     await remuxToFaststart(masterUrl, fixedMasterPath);
 
     const planned = clips.map((clip, i) => {
@@ -224,7 +231,7 @@ async function processJob(jobId, userId, masterUrl, clips) {
 
     // Let Lovable know cutting is about to start, before the first clip
     // finishes, so the UI doesn't sit blank waiting for progress.
-    await reportProgress(jobId, 0, planned.length, null);
+    await reportProgress(jobId, 0, planned.length, null, "cutting");
 
     const results = [];
 
@@ -264,10 +271,10 @@ async function processJob(jobId, userId, masterUrl, clips) {
           moment_types: clip.moment_types || [],
         });
 
-        await reportProgress(jobId, results.length, planned.length, clip.suggested_title);
+        await reportProgress(jobId, results.length, planned.length, clip.suggested_title, "cutting");
       } catch (clipErr) {
         console.error(`[${jobId}] Clip ${index} failed:`, clipErr.message);
-        await reportProgress(jobId, results.length, planned.length, clip.suggested_title);
+        await reportProgress(jobId, results.length, planned.length, clip.suggested_title, "cutting");
       } finally {
         [clipLocalPath, thumbLocalPath].forEach((p2) => {
           if (fs.existsSync(p2)) fs.unlinkSync(p2);
@@ -276,6 +283,7 @@ async function processJob(jobId, userId, masterUrl, clips) {
     }
 
     console.log(`[${jobId}] Done. ${results.length}/${clips.length} clips succeeded.`);
+    await reportProgress(jobId, results.length, planned.length, null, "finalizing");
     await reportBack({ job_id: jobId, status: results.length > 0 ? "complete" : "failed", clips: results });
   } catch (err) {
     console.error(`[${jobId}] Job failed:`, err.message);
